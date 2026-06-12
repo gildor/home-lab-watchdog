@@ -1,11 +1,7 @@
 name: external-tailscale
-# Hourly external probe: joins the tailnet (ephemeral) and checks a home service
-# is reachable OVER TAILSCALE from outside the house. On success it pings a
-# healthchecks.io check; if pings stop, healthchecks alerts. Nothing here is
-# secret — auth key, target and ping URL are GitHub Actions secrets.
 on:
   schedule:
-    - cron: '7 * * * *'   # ~hourly; GitHub may delay scheduled runs (grace covers it)
+    - cron: '7 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,10 +11,12 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Join tailnet (ephemeral)
+      - name: Join tailnet (ephemeral, OAuth)
         uses: tailscale/github-action@v3
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
           hostname: gh-watchdog
       - name: Probe home over Tailscale; ping healthchecks on success
         env:
