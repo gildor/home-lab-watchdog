@@ -24,9 +24,30 @@ jobs:
           PROBE_HOST: ${{ secrets.PROBE_HOST }}
           HC_URL: ${{ secrets.HC_EXTERNAL_URL }}
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: ${PROBE_HOST}" "http://${TARGET}/")
-          echo "probe http_code=${code}"
-          case "${code}" in
-            2*|3*) curl -fsS -m 10 "${HC_URL}" >/dev/null && echo "OK: reachable over Tailscale, pinged healthchecks";;
-            *) echo "FAIL: home unreachable over Tailscale (code=${code}); NOT pinging -> HC will alert"; exit 1;;
-          esac
+          # The path home runs through Tailscale DERP relays, so a single probe
+          # occasionally clips on transient jitter / DNS wobble / a DHCP-reconfig
+          # window — none of which is a real outage. Retry a few times and ping
+          # the instant any attempt succeeds; only stay silent (-> HC alerts)
+          # when ALL attempts fail. Keeps the "green can't lie" property: HC is
+          # still pinged only on a genuine success.
+          attempts=4
+          delay=10
+          for i in $(seq 1 "${attempts}"); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: ${PROBE_HOST}" "http://${TARGET}/" || true)
+            echo "attempt ${i}/${attempts}: probe http_code=${code}"
+            case "${code}" in
+              2*|3*)
+                if curl -fsS -m 10 "${HC_URL}" >/dev/null; then
+                  echo "OK: reachable over Tailscale (attempt ${i}/${attempts}), pinged healthchecks"
+                  exit 0
+                fi
+                echo "probe OK but healthchecks ping failed; will retry"
+                ;;
+            esac
+            if [ "${i}" -lt "${attempts}" ]; then
+              echo "retry in ${delay}s"
+              sleep "${delay}"
+            fi
+          done
+          echo "FAIL: home unreachable over Tailscale after ${attempts} attempts; NOT pinging -> HC will alert"
+          exit 1
