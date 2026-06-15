@@ -1,7 +1,11 @@
 name: external-tailscale
 on:
   schedule:
-    - cron: '7 * * * *'
+    # Every 30 min. GitHub's scheduler is best-effort and silently drops/coalesces
+    # runs under load (observed ~2h gaps from an hourly cron), which tripped the
+    # healthchecks "External to Home" check even though home was reachable. Running
+    # twice as often shrinks those gaps; the HC check's grace (~70m) absorbs the rest.
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
