@@ -1,21 +1,36 @@
 # home-lab-watchdog
 
 External Tailscale reachability probe for a private home lab. A scheduled
-GitHub Action joins the tailnet (ephemeral node) and checks a home service is
-reachable over Tailscale; on success it pings a [healthchecks.io](https://healthchecks.io)
+GitHub Action joins the tailnet (ephemeral node) and checks home is reachable
+over Tailscale; on success it pings a [healthchecks.io](https://healthchecks.io)
 check (**External to Home**), which alerts if the pings stop.
 
 This is the **only** monitor that tests the *inbound* path — "can an outside
-machine reach home over Tailscale" (tailnet auth + relay/connectivity + the
-`home-nas` subnet route + Caddy). The in-house monitors (Uptime Kuma, net-watchdog)
-all probe from *inside* the NAS and can't see this.
+machine reach home over Tailscale". The in-house monitors (Uptime Kuma,
+net-watchdog) all probe from *inside* the NAS and can't see this.
+
+It probes **two paths to the same Caddy**, because they fail independently:
+
+- **`HOME_TARGET`** — a home **tailnet `/32`** (e.g. `home-nas`). Tests tailnet
+  auth + DERP/relay + the node + Caddy.
+- **`HOME_LAN_TARGET`** — a home **LAN IP** (e.g. `192.168.50.175`) reached
+  **through the subnet route** (the node joins with `--accept-routes`). Tests the
+  primary-subnet-router election + forwarding.
+
+healthchecks is pinged **only when both are reachable**, so **External to Home**
+goes red on node death **or** a subnet-route hijack. The second path exists
+because on **2026-06-22** the HA Tailscale add-on (userspace mode) won the
+`192.168.50.0/24` primary-router election and blackholed the whole LAN, yet the
+old `/32`-only probe stayed green throughout — it routed around the very thing
+that broke.
 
 ## The probe is hardened against transient blips
 
 A single probe occasionally clips on Tailscale DERP-relay jitter or a brief WAN
 hiccup, so the workflow retries up to **4× in-run** and pings healthchecks the
-instant any attempt succeeds. It only stays silent (→ healthchecks alerts) when
-*all* attempts fail — preserving the "green can't lie" dead-man property.
+instant **both paths** are up together. It only stays silent (→ healthchecks
+alerts) when it never sees both green — preserving the "green can't lie"
+dead-man property.
 
 ## Gotcha: GitHub's scheduler is unreliable — tune the HC grace, not the cron
 

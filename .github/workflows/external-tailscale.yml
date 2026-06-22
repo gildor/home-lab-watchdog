@@ -22,36 +22,57 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
           hostname: gh-watchdog
+          # Accept the home subnet route so we can probe a LAN IP through it (see
+          # LAN_TARGET below). Without this the node only has /32s and can't test
+          # the subnet-route path at all.
+          args: --accept-routes
       - name: Probe home over Tailscale; ping healthchecks on success
         env:
+          # Two paths to the SAME Caddy, on purpose — each catches a different
+          # failure class:
+          #   TARGET     = a home tailnet /32 (e.g. home-nas). Tests tailnet auth +
+          #                relay + the node + Caddy. Survives a subnet-route break.
+          #   LAN_TARGET = a home LAN IP (e.g. 192.168.50.175) reached THROUGH the
+          #                subnet route. Tests the primary-subnet-router election +
+          #                forwarding — the path that was invisibly dead on
+          #                2026-06-22 (HA won the route election in userspace mode
+          #                and blackholed the LAN) while the /32 probe stayed green.
+          # We ping healthchecks only when BOTH are reachable, so "External to Home"
+          # goes red on node death OR route hijack. Same Host header hits the same
+          # vhost via either path.
           TARGET: ${{ secrets.HOME_TARGET }}
+          LAN_TARGET: ${{ secrets.HOME_LAN_TARGET }}
           PROBE_HOST: ${{ secrets.PROBE_HOST }}
           HC_URL: ${{ secrets.HC_EXTERNAL_URL }}
         run: |
           # The path home runs through Tailscale DERP relays, so a single probe
           # occasionally clips on transient jitter / DNS wobble / a DHCP-reconfig
           # window — none of which is a real outage. Retry a few times and ping
-          # the instant any attempt succeeds; only stay silent (-> HC alerts)
-          # when ALL attempts fail. Keeps the "green can't lie" property: HC is
-          # still pinged only on a genuine success.
+          # the instant BOTH paths are up together; only stay silent (-> HC alerts)
+          # when we never see both green. Keeps the "green can't lie" property: HC
+          # is pinged only on a genuine, complete success.
+          probe() { # $1=ip/host  -> echoes http_code (000 on failure)
+            curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+              -H "Host: ${PROBE_HOST}" "http://$1/" || true
+          }
+          ok() { case "$1" in 2*|3*) return 0;; *) return 1;; esac; }
           attempts=4
           delay=10
           for i in $(seq 1 "${attempts}"); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "Host: ${PROBE_HOST}" "http://${TARGET}/" || true)
-            echo "attempt ${i}/${attempts}: probe http_code=${code}"
-            case "${code}" in
-              2*|3*)
-                if curl -fsS -m 10 "${HC_URL}" >/dev/null; then
-                  echo "OK: reachable over Tailscale (attempt ${i}/${attempts}), pinged healthchecks"
-                  exit 0
-                fi
-                echo "probe OK but healthchecks ping failed; will retry"
-                ;;
-            esac
+            node_code=$(probe "${TARGET}")          # tailnet /32: node + Caddy
+            lan_code=$(probe "${LAN_TARGET}")        # LAN IP via subnet route: route + Caddy
+            echo "attempt ${i}/${attempts}: node=${node_code} lan=${lan_code}"
+            if ok "${node_code}" && ok "${lan_code}"; then
+              if curl -fsS -m 10 "${HC_URL}" >/dev/null; then
+                echo "OK: reachable over Tailscale via node AND subnet route (attempt ${i}/${attempts}), pinged healthchecks"
+                exit 0
+              fi
+              echo "probes OK but healthchecks ping failed; will retry"
+            fi
             if [ "${i}" -lt "${attempts}" ]; then
               echo "retry in ${delay}s"
               sleep "${delay}"
             fi
           done
-          echo "FAIL: home unreachable over Tailscale after ${attempts} attempts; NOT pinging -> HC will alert"
+          echo "FAIL: node and/or subnet-route path unreachable after ${attempts} attempts; NOT pinging -> HC will alert"
           exit 1
