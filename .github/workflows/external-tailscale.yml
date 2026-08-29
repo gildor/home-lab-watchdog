@@ -1,11 +1,14 @@
 name: external-tailscale
 on:
-  schedule:
-    # Every 30 min. GitHub's scheduler is best-effort and silently drops/coalesces
-    # runs under load (observed ~2h gaps from an hourly cron), which tripped the
-    # healthchecks "External to Home" check even though home was reachable. Running
-    # twice as often shrinks those gaps; the HC check's grace (~70m) absorbs the rest.
-    - cron: '*/30 * * * *'
+  # Triggered by the home-side `ops/watchdog-dispatch` stack (hourly, with
+  # retries) via the GitHub API — see home-lab stacks/ops/watchdog-dispatch.
+  # The `schedule:` cron was REMOVED 2026-08-30: GitHub's scheduler is
+  # best-effort and silently drops runs under load — during the 2026-08-24..27
+  # Actions incidents a */30 cron degraded to 6-11h gaps, false-alerting the
+  # healthchecks "External to Home" dead-man while home was fine. Home-side
+  # dispatch keeps the dead-man honest: home offline -> no dispatch -> no
+  # probe -> no HC ping -> alert. keepalive.yml was removed with the cron —
+  # dispatch-only workflows aren't subject to GitHub's 60-day auto-disable.
   workflow_dispatch:
 permissions:
   contents: read
